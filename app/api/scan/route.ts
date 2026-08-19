@@ -24,7 +24,17 @@ function nowIST() {
 function marketWindow() {
   const d = nowIST();
   const minutes = d.getHours() * 60 + d.getMinutes();
-  return { d, minutes, open: minutes >= 555 && minutes < 930, signalWindow: minutes >= 560 && minutes < 600 };
+  return { d, open: minutes >= 555 && minutes < 930, signalWindow: minutes >= 560 && minutes < 600 };
+}
+
+async function inBatches<T, R>(items: T[], size: number, worker: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = [];
+  for (let i = 0; i < items.length; i += size) {
+    const batch = items.slice(i, i + size);
+    const result = await Promise.all(batch.map(worker));
+    out.push(...result);
+  }
+  return out;
 }
 
 async function resolveInstruments(token: string): Promise<Instrument[]> {
@@ -32,7 +42,7 @@ async function resolveInstruments(token: string): Promise<Instrument[]> {
   if (cachePromise) return cachePromise;
 
   cachePromise = (async () => {
-    const results = await Promise.all(UNIVERSE.map(async (symbol) => {
+    const results = await inBatches(UNIVERSE, 8, async (symbol) => {
       const url = new URL("https://api.upstox.com/v2/instruments/search");
       url.searchParams.set("query", symbol);
       url.searchParams.set("exchanges", "NSE");
@@ -45,13 +55,15 @@ async function resolveInstruments(token: string): Promise<Instrument[]> {
       });
       if (!r.ok) return null;
       const j = await r.json();
-      const item = (j?.data ?? []).find((x: Instrument) => x.segment === "NSE_EQ" && x.instrument_type === "EQ" && x.trading_symbol === symbol);
-      return item ?? null;
-    }));
+      return (j?.data ?? []).find((x: Instrument) => x.segment === "NSE_EQ" && x.instrument_type === "EQ" && x.trading_symbol === symbol) ?? null;
+    });
     cachedInstruments = results.filter(Boolean) as Instrument[];
     cachePromise = null;
     return cachedInstruments;
-  })();
+  })().catch((error) => {
+    cachePromise = null;
+    throw error;
+  });
 
   return cachePromise;
 }
@@ -67,14 +79,12 @@ async function candles(token: string, key: string): Promise<Candle[]> {
   return Array.isArray(j?.data?.candles) ? j.data.candles : [];
 }
 
-function scoreSignal(side: "BUY" | "SELL", breakout: string, rvol: number, rangePct: number) {
+function scoreSignal(side: "BUY" | "SELL", rvol: number, rangePct: number) {
   let score = 50;
   if (rvol >= 3) score += 25;
   else if (rvol >= 2) score += 18;
-  else if (rvol >= 1.5) score += 10;
   if (rangePct >= 1) score += 10;
   else if (rangePct >= 0.5) score += 5;
-  if (breakout !== "OPENING RANGE") score += 5;
   if (side === "BUY" || side === "SELL") score += 5;
   return Math.min(100, score);
 }
@@ -83,7 +93,7 @@ export async function GET(request: NextRequest) {
   const token = request.cookies.get("pt_access_token")?.value;
   if (!token) return NextResponse.json({ connected: false, error: "Upstox is not connected." }, { status: 401 });
 
-  const { d, minutes, open, signalWindow } = marketWindow();
+  const { d, open, signalWindow } = marketWindow();
   const marketTime = d.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
 
   if (!open) {
@@ -91,7 +101,7 @@ export async function GET(request: NextRequest) {
   }
 
   const instruments = await resolveInstruments(token);
-  const rows = await Promise.all(instruments.map(async (instrument) => {
+  const rows = await inBatches(instruments, 8, async (instrument) => {
     const cs = await candles(token, instrument.instrument_key);
     if (cs.length < 2) return null;
 
@@ -114,7 +124,7 @@ export async function GET(request: NextRequest) {
     const risk = Math.abs(entry - sl);
     if (!Number.isFinite(entry) || !Number.isFinite(sl) || risk <= 0) return null;
     const target = side === "BUY" ? entry + risk * 2 : entry - risk * 2;
-    const score = scoreSignal(side, "OPENING RANGE", rvol, rangePct);
+    const score = scoreSignal(side, rvol, rangePct);
 
     return {
       symbol: instrument.trading_symbol,
@@ -133,7 +143,7 @@ export async function GET(request: NextRequest) {
       openingHigh: opening[2],
       openingLow: opening[3],
     };
-  }));
+  });
 
   const signals = rows.filter(Boolean).sort((a: any, b: any) => b.score - a.score);
   const buys = signals.filter((x: any) => x.side === "BUY").length;
