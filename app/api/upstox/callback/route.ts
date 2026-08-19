@@ -1,21 +1,54 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+export const dynamic = "force-dynamic";
+
+function verifyState(state: string, secret: string): boolean {
+  const parts = state.split(".");
+  if (parts.length !== 3) return false;
+
+  const [timestamp, nonce, signature] = parts;
+  if (!timestamp || !nonce || !/^[0-9]+$/.test(timestamp) || !/^[a-f0-9]{64}$/i.test(signature)) {
+    return false;
+  }
+
+  // State is short-lived. Allow 10 minutes for the login round-trip.
+  const age = Date.now() - Number(timestamp);
+  if (!Number.isFinite(age) || age < -60_000 || age > 10 * 60_000) return false;
+
+  const payload = `${timestamp}.${nonce}`;
+  const expected = createHmac("sha256", secret).update(payload).digest("hex");
+  const actualBuffer = Buffer.from(signature, "hex");
+  const expectedBuffer = Buffer.from(expected, "hex");
+
+  return actualBuffer.length === expectedBuffer.length && timingSafeEqual(actualBuffer, expectedBuffer);
+}
 
 export async function GET(request: NextRequest) {
   const params = request.nextUrl.searchParams;
   const code = params.get("code");
   const returnedState = params.get("state");
-  const savedState = request.cookies.get("pt_oauth_state")?.value;
 
-  if (!code) return NextResponse.json({ error: "Missing Upstox authorization code." }, { status: 400 });
-  if (!returnedState || !savedState || returnedState !== savedState) {
-    return NextResponse.json({ error: "Invalid OAuth state." }, { status: 400 });
+  if (!code) {
+    return NextResponse.json({ error: "Missing Upstox authorization code." }, { status: 400 });
   }
 
   const clientId = process.env.UPSTOX_CLIENT_ID;
   const clientSecret = process.env.UPSTOX_CLIENT_SECRET;
   const redirectUri = process.env.UPSTOX_REDIRECT_URI;
+
   if (!clientId || !clientSecret || !redirectUri) {
-    return NextResponse.json({ error: "Upstox environment variables are not configured." }, { status: 500 });
+    return NextResponse.json(
+      { error: "Upstox environment variables are not configured." },
+      { status: 500 }
+    );
+  }
+
+  if (!returnedState || !verifyState(returnedState, clientSecret)) {
+    return NextResponse.json(
+      { error: "Invalid or expired OAuth state. Please start the Upstox login again from the scanner." },
+      { status: 400 }
+    );
   }
 
   const body = new URLSearchParams({
@@ -28,14 +61,20 @@ export async function GET(request: NextRequest) {
 
   const tokenResponse = await fetch("https://api.upstox.com/v2/login/authorization/token", {
     method: "POST",
-    headers: { accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
+    headers: {
+      accept: "application/json",
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
     body,
     cache: "no-store",
   });
 
   const data = await tokenResponse.json();
   if (!tokenResponse.ok || !data.access_token) {
-    return NextResponse.json({ error: "Upstox token exchange failed.", details: data }, { status: 502 });
+    return NextResponse.json(
+      { error: "Upstox token exchange failed.", details: data },
+      { status: 502 }
+    );
   }
 
   const response = NextResponse.redirect(new URL("/", request.url));
@@ -46,6 +85,6 @@ export async function GET(request: NextRequest) {
     path: "/",
     maxAge: 60 * 60 * 12,
   });
-  response.cookies.delete("pt_oauth_state");
+
   return response;
 }
