@@ -1,16 +1,32 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { createHmac, randomBytes } from "node:crypto";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
-  const clientId = process.env.UPSTOX_CLIENT_ID;
-  const redirectUri = process.env.UPSTOX_REDIRECT_URI;
-  const clientSecret = process.env.UPSTOX_CLIENT_SECRET;
+function getRedirectUri(request: NextRequest) {
+  const configured = process.env.UPSTOX_REDIRECT_URI?.trim();
+  const fallback = new URL("/api/upstox/callback", request.nextUrl.origin).toString();
 
-  if (!clientId || !redirectUri || !clientSecret) {
+  if (configured) {
+    try {
+      const configuredUrl = new URL(configured);
+      if (configuredUrl.origin === request.nextUrl.origin) return configuredUrl.toString();
+    } catch {
+      // Fall through to the current-origin callback.
+    }
+  }
+
+  return fallback;
+}
+
+export async function GET(request: NextRequest) {
+  const clientId = process.env.UPSTOX_CLIENT_ID?.trim();
+  const clientSecret = process.env.UPSTOX_CLIENT_SECRET;
+  const redirectUri = getRedirectUri(request);
+
+  if (!clientId || !clientSecret) {
     return NextResponse.json(
-      { error: "UPSTOX_CLIENT_ID, UPSTOX_CLIENT_SECRET and UPSTOX_REDIRECT_URI are not configured." },
+      { error: "UPSTOX_CLIENT_ID and UPSTOX_CLIENT_SECRET are not configured." },
       { status: 500 }
     );
   }
