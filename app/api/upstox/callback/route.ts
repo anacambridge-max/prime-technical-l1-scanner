@@ -12,7 +12,6 @@ function verifyState(state: string, secret: string): boolean {
     return false;
   }
 
-  // State is short-lived. Allow 10 minutes for the login round-trip.
   const age = Date.now() - Number(timestamp);
   if (!Number.isFinite(age) || age < -60_000 || age > 10 * 60_000) return false;
 
@@ -24,6 +23,22 @@ function verifyState(state: string, secret: string): boolean {
   return actualBuffer.length === expectedBuffer.length && timingSafeEqual(actualBuffer, expectedBuffer);
 }
 
+function getRedirectUri(request: NextRequest) {
+  const configured = process.env.UPSTOX_REDIRECT_URI?.trim();
+  const fallback = new URL("/api/upstox/callback", request.nextUrl.origin).toString();
+
+  if (configured) {
+    try {
+      const configuredUrl = new URL(configured);
+      if (configuredUrl.origin === request.nextUrl.origin) return configuredUrl.toString();
+    } catch {
+      // Fall through to the current-origin callback.
+    }
+  }
+
+  return fallback;
+}
+
 export async function GET(request: NextRequest) {
   const params = request.nextUrl.searchParams;
   const code = params.get("code");
@@ -33,11 +48,11 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Missing Upstox authorization code." }, { status: 400 });
   }
 
-  const clientId = process.env.UPSTOX_CLIENT_ID;
+  const clientId = process.env.UPSTOX_CLIENT_ID?.trim();
   const clientSecret = process.env.UPSTOX_CLIENT_SECRET;
-  const redirectUri = process.env.UPSTOX_REDIRECT_URI;
+  const redirectUri = getRedirectUri(request);
 
-  if (!clientId || !clientSecret || !redirectUri) {
+  if (!clientId || !clientSecret) {
     return NextResponse.json(
       { error: "Upstox environment variables are not configured." },
       { status: 500 }
